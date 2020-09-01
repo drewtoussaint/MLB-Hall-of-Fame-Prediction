@@ -1,0 +1,416 @@
+---
+title: "Major League Baseball - Hall of Fame - Capstone Project"
+output: html_notebook
+---
+
+The goal of my project is to build a machine learning model that will accurately predict the probability that a Hall of Fame eligible Major League Baseball pitcher and hitter have of being selected into the Hall of Fame based on his career stats. 
+
+Loading all necessary packages.
+```{r}
+setwd("/Users/andrewtoussaint/Desktop/Data Science Course Material")
+
+library(readxl) 
+library(writexl)
+library(dplyr)
+library(tree)
+library(boot)
+library(caret)
+library(RANN)
+library(e1071)
+library(arm)
+library(xgboost)
+library(lattice)
+library(rattle)
+library(kernlab)
+library(rpart)
+library(ggcorrplot)
+library(corrplot)
+library(MASS)
+library(pROC)
+library(mice)
+library(leaps)
+```
+
+I downloaded my datasets from Fangraphs and Baseball Reference. The all_hitters and all_pitchers datasets contain hitters and pitchers with qualified at bats and innings pitched. The hof_hitters and hof_pitchers datasets contain all the available Hall of Fame hitters and pitchers. The active_hitters and active_pitchers datasets contain all the hitters and pitchers that played in the last 5 seasons; these players are not eligible for the Hall of Fame yet. The hitters_ballot_2021 and pitchers_ballot_2021 datasets are probable 2021 Hall of Fame ballots that I will use as the test set for the model. The all_yob_counts dataset is a aggregate of all the players that appear on Hall of Fame ballots throughout its history. The common_hitters and common_pitchers datasets contain players that are listed as hitters and pitchers in each all_hitters and all_pitchers datasets.
+
+Loading of all datasets.
+```{r}
+all_hitters = read_excel("hof_hitters_data.xlsx", sheet = "All_Hitters")
+hof_hitters = read_excel("hof_hitters_data.xlsx", sheet = "Hof_Hitters")
+active_hitters = read_excel("hof_hitters_data.xlsx", sheet = "Active_Hitters")
+hitters_ballot_2021 = read_excel("hof_hitters_data.xlsx", sheet = "Hof_Hitters_Ballot_2021")
+mvp = read_excel("mvp_data.xlsx", sheet = "MVPs Count")
+gold_gloves = read_excel("Gold Gloves.xlsx", sheet = "Gold Gloves")
+
+all_pitchers = read_excel("hof_pitchers_data.xlsx", sheet = "All_Pitchers")
+hof_pitchers = read_excel("hof_pitchers_data.xlsx", sheet = "Hof_Pitchers")
+active_pitchers = read_excel("hof_pitchers_data.xlsx", sheet = "Active_Pitchers")
+pitchers_ballot_2021 = read_excel("hof_pitchers_data.xlsx", sheet = "Hof_Pitchers_Ballot_2021")
+cy_young = read_excel("cyyoung_data.xlsx", sheet = "Cy Young Count")
+
+all_yob_counts = read_excel("HOF_Ballots.xlsx", sheet = "YOB")
+common_hitters = read_excel("hof_common.xlsx", sheet = "hitters")
+common_pitchers = read_excel("hof_common.xlsx", sheet = "pitchers")
+```
+
+Hitters Data Management & Manipulation
+
+I merged 6 hitters datasets to create 1 dataset. I found a new function called anti_join in the dplyr package that really came in handy. Anti_join allowed me to remove names frmo the all_hitters dataset by the  playerid variable. I needed to remove players who are on the prospective 2021 Hall of Fame ballot, ineligible players (active players), and players that were common on the pitcher's and hitter's datasets. I then merged three datasets to create the mvp, years on the ballot (YOB), and Hall of Fame (HOF) variables. Next, I changed the NA values in four variables to 0. I remmoved an extra column created due to the merging of datasets, and renamed a duplicate column. Next, I created a new variable for the future train and test sets called WARg which is the WAR variable divided by the G (games) variable. I moved the dependent variable, HOF, to the end of the dataset. Lastly, I used the mice package to do KNN imputation on two variables. 
+
+```{r}
+hitters = all_hitters %>% anti_join(hitters_ballot_2021, by="playerid") %>%
+  anti_join(active_hitters, by="playerid") %>%
+  anti_join(common_pitchers, by="playerid") %>%
+  merge(mvp, by="Name", all.x=TRUE) %>%
+  merge(all_yob_counts, by="Name", all.x=TRUE) %>%
+  merge(gold_gloves, by="Name", all.x=TRUE) %>%
+  merge(hof_hitters, by="playerid", all.x=TRUE)
+
+hitters$MVPs[is.na(hitters$MVPs)] = 0
+hitters$YOB[is.na(hitters$YOB)] = 0
+hitters$HOF[is.na(hitters$HOF)] = 0
+hitters$SB[is.na(hitters$SB)] = 0
+hitters$GoldGloves[is.na(hitters$GoldGloves)] = 0
+hitters = subset(hitters, select = -c(Name.y))
+hitters = hitters %>% rename(Name = Name.x)
+hitters$WARg = as.numeric(hitters$`WAR`/hitters$`G`)
+hitters_ballot_2021$WARg = as.numeric(hitters_ballot_2021$`WAR`/hitters_ballot_2021$`G`)
+hitters = hitters %>% relocate(HOF, .after = WARg)
+
+hitters_imp = mice(hitters, method = "cart")
+hitters=complete(hitters_imp)
+```
+
+Pitchers Data Management & Manipulation
+
+For the pitchers datasets, I duplicated the steps I used on the hitters datasets. I did not need to impute any missing values.
+
+```{r}
+######### Pitchers Data Management & Manipulation
+pitchers = all_pitchers %>% anti_join(pitchers_ballot_2021, by="playerid") %>%
+  anti_join(active_pitchers, by="playerid") %>%
+  anti_join(common_hitters, by="playerid") %>%
+  merge(cy_young, by="Name", all.x=TRUE) %>%
+  merge(all_yob_counts, by="Name", all.x=TRUE) %>%
+  merge(hof_pitchers, by="playerid", all.x=TRUE)
+
+pitchers$CyYoung[is.na(pitchers$CyYoung)] = 0
+pitchers$YOB[is.na(pitchers$YOB)] = 0
+pitchers$HOF[is.na(pitchers$HOF)] = 0
+pitchers = subset(pitchers, select = -c(Name.y))
+pitchers = pitchers %>% rename(Name = Name.x)
+pitchers$WARg = as.numeric(pitchers$`WAR`/pitchers$`G`)
+pitchers_ballot_2021$WARg = as.numeric(pitchers_ballot_2021$`WAR`/pitchers_ballot_2021$`G`)
+pitchers = pitchers %>% relocate(HOF, .after = WARg)
+```
+
+More Data Management and Manipulation
+
+I had issues with my column names when trying to run the models. Some of the column names had %, +, and / signs. So I ran the make.names function on my 4 datasets.
+
+```{r}
+colnames(hitters) <- make.names(colnames(hitters))
+colnames(pitchers) <- make.names(colnames(pitchers))
+colnames(hitters_ballot_2021) <- make.names(colnames(hitters_ballot_2021))
+colnames(pitchers_ballot_2021) <- make.names(colnames(pitchers_ballot_2021))
+```
+
+Correlation Analysis
+
+I subset the hitters and pitchers datasets to remove character variables (Name, Team) and unused variables (playerid). Then, I visualized the correlation of all numeric variables. There were some highly correlated variables that made me concerned about multicollinearity.
+
+```{r}
+hitters_cor = subset(hitters, select = -c(playerid, Name, Team))
+pitchers_cor = subset(pitchers, select = -c(playerid, Name, Team))
+
+corrplot(cor(hitters_cor, use="complete.obs"), method="number",type="lower", number.cex = .7)
+corrplot(cor(pitchers_cor, use="complete.obs"), method="number",type="lower", number.cex = .7)
+```
+
+I changed the dependent variables for each dataset into a factor so I could create histograms and violin charts. This is also needed to run the ML models in the caret package.
+
+```{r}
+hitters$HOF = as.factor(hitters$HOF)
+pitchers$HOF = as.factor(pitchers$HOF)
+```
+
+VISUALIZATIONS
+
+Histgrams for the hitters dataset. 
+
+Hitters with a WAR greater than 60 have a really strong probability of becoming a Hall of Famer. A WAR per game (WARg) of .025 looks to be a high indicator of a hitter's Hall of Fame chance. Though because this is a per game stat, some players lack a large resume of counting stats that did not translate to those players becoming a Hall of Famer. The more games played, the better chance you have of accumulating the statistics to become a Hall of Fame hitter but it doesn't guarantee a hitter's chances of being a Hall of Famer. Plate appearances (PA) are very similar to games played, the more PAs you get, the better your chances are of accumulating the stats to be a Hall of Fame hitter. Homeruns (HR) hit has a strong correlation to becoming a Hall of Fame hitter. Hitting more than 400 HRs in your career nearly guarantees you to being a Hall of Famer hitter.
+
+```{r}
+ggplot(hitters, aes(x=WAR, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(hitters, aes(x=WARg, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(hitters, aes(x=G, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(hitters, aes(x=PA, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(hitters, aes(x=HR, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(hitters, aes(x=H, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+```
+
+Violin charts for the hitters dataset.
+
+The violin charts show a lot of what I explained in the histogram charts. Years on ballot (YOB) shows that if you're able to stay on the ballot for some years then you have an increased chance to become a Hall of Fame hitter. The strongest correlation is that hitter's that spend 5 years or less on the ballot presumeably have a less chance of becoming a Hall of Fame hitter.
+
+```{r}
+ggplot(hitters, aes(x=HOF, y=WAR, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=WARg, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=G, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=YOB, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=G, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=PA, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=HR, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(hitters, aes(x=HOF, y=H, fill=HOF)) +
+  geom_violin(trim=FALSE)
+```
+
+Histgrams for the pitchers dataset.
+
+Pitcher's with a WAR of about 75 and greater have a strong chance of becoming a Hall of Fame pitcher. WARg does not have great predictive value for pitchers because pitchers are more susceptible to injuries causing them to not be able to accumulate enough counting stats to be Hall of Fame worthy. Innings pitched (IP) shows pitcher's that are able to stay healthy and pitch for a long time have a better chance of being Hall of Fame worthy. IP is also an indication that the pitcher is a quality performer since he has been able to pitch as long as he has. Games is a mixed bag for pitchers because pitcher's can pitch in numerous games for limited innings, relief pitchers, accumulating more appearances than starting pitchers. Pitchers accumulating 275 or greater wins almost guarantees his chances of becoming a Hall of Famer.
+
+```{r}
+ggplot(pitchers, aes(x=WAR, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(pitchers, aes(x=WARg, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(pitchers, aes(x=IP, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(pitchers, aes(x=G, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(pitchers, aes(x=W, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+ggplot(pitchers, aes(x=SV, fill=HOF, color=HOF)) +
+  geom_histogram(position="identity", alpha=0.5)
+```
+
+Violin charts for the pitchers dataset.
+
+Most of the violin charts reiterate what is seen in the histograms. The saves (SV) statistic is seen primarily for relief pitchers. Very few relief pitchers are Hall of Fame worthy but the ones that are usually worthy have to accumulate 200+ saves in their career along with other really good supporting statistics.
+
+```{r}
+ggplot(pitchers, aes(x=HOF, y=WAR, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=WARg, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=IP, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=G, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=W, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=SV, fill=HOF)) +
+  geom_violin(trim=FALSE)
+ggplot(pitchers, aes(x=HOF, y=YOB, fill=HOF)) +
+  geom_violin(trim=FALSE)
+```
+Hitters Models
+
+I was able to run multiple logistic regression analysis with a mix of different variables. What I found was, even though a lot of the variables didn't show great significance individually in the models, they were strong together when I ran more advanced models. When I used less variables in the analysis, the variables were more significant but the AIC increased in every case. 
+
+```{r}
+hitters.logit = glm(HOF~.-playerid-Name-Team, hitters, family="binomial")
+summary(hitters.logit)
+
+hitters.reg = regsubsets(HOF~.-playerid-Name-Team,hitters)
+summary(hitters.reg)
+
+hitters.logit.1 = glm(HOF~ WAR+YOB, hitters, family="binomial")
+summary(hitters.logit.1)
+
+hitters.logit.2 = glm(HOF~ WAR+YOB+WARg+G, hitters, family="binomial")
+summary(hitters.logit.2)
+
+hitters.logit.3 = glm(HOF~ HR+RBI+H+YOB+R+MVPs+GoldGloves, hitters, family="binomial")
+summary(hitters.logit.3)
+
+hitters.logit.4 = glm(HOF~ WAR, hitters, family="binomial")
+summary(hitters.logit.4)
+```
+Advanced Models with 10 fold cross-validation. I left all the numeric variables in the equation.
+
+```{r}
+hitters_tr = subset(hitters, select = -c(playerid, Name, Team))
+hitters_t = subset(hitters_ballot_2021, select = -c(playerid, Name, Team))
+
+# 10-fold Cross-Validation
+control <- trainControl(method="cv", number=10)
+metric <- "Accuracy"
+
+# Linear Discriminant Analysis (LDA)
+set.seed(1)
+fit.lda <- train(HOF~., data=hitters_tr, method="lda", metric=metric, trControl=control)
+
+# Classfication and Regression Trees (CART)
+set.seed(1)
+fit.cart <- train(HOF~., data=hitters_tr, method="rpart", metric=metric, trControl=control)
+
+# k-Nearest Neighbors (KNN)
+set.seed(1)
+fit.knn <- train(HOF~., data=hitters_tr, method="knn", metric=metric, trControl=control)
+
+# Bayesian Generalized Linear Model - Logistic Regression
+set.seed(1)
+fit.baylogi <- train(HOF~., data=hitters_tr, method="bayesglm", metric=metric, trControl=control)
+
+# Support Vector Machines (SVM)
+set.seed(1)
+fit.svm <- train(HOF~., data=hitters_tr, method="svmRadial", metric=metric, trControl=control)
+
+# Random Forest
+set.seed(1)
+fit.rf <- train(HOF~., data=hitters_tr, method="rf", metric=metric, trControl=control)
+
+# Gradient Boosting Machines/XGBoost-Linear Model
+set.seed(1)
+fit.xgb <- train(HOF~., data=hitters_tr, method="xgbLinear", metric=metric, trControl=control)
+
+# Gradient Boosting Machines/XGBoost-Tree Model
+set.seed(1)
+fit.xgb.t <- train(HOF~., data=hitters_tr, method="xgbTree", metric=metric, trControl=control)
+
+# Logistic Regression
+set.seed(1)
+fit.logi <- train(HOF~., data=hitters_tr, method="glm", metric=metric, trControl=control)
+```
+
+Select the best model and summarize the accuracy of the models.
+
+All the models had really good average accuracy, so just choosing a model based on accuracy, I could not have went wrong with any. When looking at the best average kappa, the gradient boosting machines/XGBoost-tree model had the best average kappa. A kappa of .83 shows that it substantially measures the reliability of the inter-raters. The XGBoost-tree model had the best average accuracy and kappa, so it was an easy choice to pick.
+
+```{r}
+# Select Best Model
+# summarize accuracy of models
+results <- resamples(list(lda=fit.lda, cart=fit.cart, knn=fit.knn, baylogi=fit.baylogi, svm=fit.svm, rf=fit.rf, xgb.l=fit.xgb, xgb.t=fit.xgb.t, logi=fit.logi))
+summary(results)
+```
+
+Here is the summary of the XGBoost-tree model.
+
+```{r}
+print(fit.xgb.t)
+```
+
+Pitchers Models
+
+Simlar to the hitter's models that I ran, some variables in the pitcher's models were not significant individually but together they made the advanced models perform very strong. Compared to the hitters logistic models, there were more significant variables.
+
+```{r}
+# Pitchers Models
+pitchers.logit = glm(HOF~ .-playerid-Name-Team, pitchers, family="binomial")
+summary(pitchers.logit)
+
+pitchers.reg = regsubsets(HOF~.-playerid-Name-Team,pitchers)
+summary(pitchers.reg)
+
+pitchers.logit.1 = glm(HOF~ WAR, pitchers, family="binomial")
+summary(pitchers.logit.1)
+
+pitchers.logit.2 = glm(HOF~ WAR+YOB+GS, pitchers, family="binomial")
+summary(pitchers.logit.2)
+
+pitchers.logit.3 = glm(HOF~ WAR+G+GS+YOB+WARg, pitchers, family="binomial")
+summary(pitchers.logit.3)
+
+pitchers.logit.4 = glm(HOF~ WAR+W+SV+G+GS+CyYoung+YOB, pitchers, family="binomial")
+summary(pitchers.logit.4)
+```
+
+Advanced Models with 10 fold cross-validation. I left all the numeric variables in the equation for the pitcher's models as well.
+
+```{r}
+pitchers_tr = subset(pitchers, select = -c(playerid, Name, Team))
+pitchers_t = subset(pitchers_ballot_2021, select = -c(playerid, Name, Team))
+
+# Linear Discriminant Analysis (LDA)
+set.seed(1)
+fit.lda.1 <- train(HOF~., data=pitchers_tr, method="lda", metric=metric, trControl=control)
+
+# Classfication and Regression Trees (CART)
+set.seed(1)
+fit.cart.1 <- train(HOF~., data=pitchers_tr, method="rpart", metric=metric, trControl=control)
+
+# k-Nearest Neighbors (KNN)
+set.seed(1)
+fit.knn.1 <- train(HOF~., data=pitchers_tr, method="knn", metric=metric, trControl=control)
+
+# Bayesian Generalized Linear Model - Logistic Regression
+set.seed(1)
+fit.baylogi.1 <- train(HOF~., data=pitchers_tr, method="bayesglm", metric=metric, trControl=control)
+
+# Support Vector Machines (SVM)
+set.seed(1)
+fit.svm.1 <- train(HOF~., data=pitchers_tr, method="svmRadial", metric=metric, trControl=control)
+
+# Random Forest
+set.seed(1)
+fit.rf.1 <- train(HOF~., data=pitchers_tr, method="rf", metric=metric, trControl=control)
+
+# Gradient Boosting Machines/XGBoost-Linear Model
+set.seed(1)
+fit.xgb.1 <- train(HOF~., data=pitchers_tr, method="xgbLinear", metric=metric, trControl=control)
+
+# Gradient Boosting Machines/XGBoost-Tree Model
+set.seed(1)
+fit.xgb.t.1 <- train(HOF~., data=pitchers_tr, method="xgbTree", metric=metric, trControl=control)
+
+# Logistic Regression
+set.seed(1)
+fit.logi.1 <- train(HOF~., data=pitchers_tr, method="glm", metric=metric, trControl=control)
+```
+
+Select the best model and summarize the accuracy of the models.
+
+Similar to the hitter's models, all the advanced models performed extremely well in accuracy and kappa. Choosing any of the models based solely on accuracy would have been fine. All of the models had an average accuracy above 98% and there were 3 that had a max accuracy of 100%. The Bayesian Generalized Linear Model - Logistic Regression was the most accurate with an average accuracy of 99.3%. It also had the best kappa at .87 which was the highest and no other model performed at over .80. At .87 kappa, the Bayesian Generalized Linear Model - Logistic Regression showed it substantially measures the reliability of the inter-raters. 
+
+```{r}
+results <- resamples(list(lda=fit.lda.1, cart=fit.cart.1,knn=fit.knn.1, baylogi=fit.baylogi.1, svm=fit.svm.1, rf=fit.rf.1, xgb.l=fit.xgb.1, xgb.t=fit.xgb.t.1, logi=fit.logi))
+summary(results)
+```
+
+Here is the summary of the Bayesian Generalized Linear Model - Logistic Regression.
+
+```{r}
+print(fit.baylogi.1)
+```
+
+I performed my prediction on my hitters testing set. The prediction using the XGB Tree model was good based on my industry expertise. 7 hitters had over 70% chance of being a Hall of Famer. Not seen here (submitted separately), I did predictions using other models and some of the other models actually made more sense from a industry standpoint.
+
+A 99% sensitivity identifies that the model was able to highly identify all the Hall of Famer hitters in the training set. A 96% specificity identifies that the model was able to highly identify all of the non-Hall of Fame hitters in the training set. 
+
+```{r}
+hitters_pred = as.data.frame(predict(fit.xgb.t, hitters_t, type = "prob"))
+
+pred.xgb = predict(fit.xgb.t, type = "prob", hitters_tr)
+pred.xgb_1 = as.numeric(pred.xgb[,2])
+xgb.roc = roc(response = hitters_tr$HOF, predictor = pred.xgb_1)
+plot(xgb.roc, legacy.axes = TRUE, print.auc.y = 1.0, print.auc = TRUE)
+coords(xgb.roc, "best", "threshold")
+```
+
+I performed my prediction on my pitchers testing set. The prediction was a really good prediction based on my industry expertise. 3 pitchers had over 65% chance of being a Hall of Famer. A 99% sensitivity identifies that the model was able to highly identify all the Hall of Famer pitchers in the training set. A 98% specificity identifies that the model was able to highly identify all of the non-Hall of Fame pitchers in the training set. 
+
+```{r}
+pitchers_pred = as.data.frame(predict(fit.baylogi.1, pitchers_t, type = "raw"))
+
+pred.xgb.1 = predict(fit.baylogi.1, type = "prob", pitchers_tr)
+pred.xgb_2 = as.numeric(pred.xgb.1[,2])
+xgb.roc.1 = roc(response = pitchers_tr$HOF, predictor = pred.xgb_2)
+plot(xgb.roc.1, legacy.axes = TRUE, print.auc.y = 1.0, print.auc = TRUE)
+coords(xgb.roc.1, "best", "threshold")
+```
+
+Overall I believe the visual analysis coupled with the model analysis allow me to believe that I have made strong predicitons. There may be ways to make the model stronger if I am able to input more subjective data into the datasets, such as, scandals. 
